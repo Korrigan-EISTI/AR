@@ -14,8 +14,11 @@ public class ARClientTCP : MonoBehaviour
 {
     public ARCameraManager cameraManager;
     public ARRaycastManager raycastManager;
+    public ARAnchorManager anchorManager;
     public GameObject labelPrefab;
+    public GameObject cubeOutlinePrefab;
     public Button scanButton;
+    public RectTransform scanWindow;
     public string serverIP = "172.31.208.1";
     public int serverPort = 5001;
 
@@ -114,72 +117,105 @@ public class ARClientTCP : MonoBehaviour
                 yield break;
             }
 
-            if (best != null && !string.IsNullOrEmpty(best.name) && best.confidence >= 0.4f)
+            if (best != null && !string.IsNullOrEmpty(best.name) && best.confidence >= 0.55f)
+            {
                 DisplayBestDetection(best, conversionParams.outputDimensions.x, conversionParams.outputDimensions.y);
+            }
         }
     }
 
     void DisplayBestDetection(DetectionResult det, int width, int height)
     {
-        ClearLabels();
 
         float centerX = (det.xmax + det.xmin) / 2f;
-        float topY = det.ymin;
-        Vector2 imagePoint = new Vector2(centerX, topY);
+        float centerY = (det.ymax + det.ymin) / 2f;
+        Vector2 imagePoint = new Vector2(centerX, centerY);
+
+        float cropX = 0.25f;
+        float cropY = 0.25f;
+        float cropW = 0.5f;
+        float cropH = 0.5f;
 
         float normX = imagePoint.x / width;
-        float normY = 1f - (imagePoint.y / height);
-        Vector2 viewportPoint = new Vector2(normX, normY);
+        float normY = imagePoint.y / height;
+        float screenX = (cropX + normX * cropW) * Screen.width;
+        float screenY = (1f - (cropY + normY * cropH)) * Screen.height;
+        Vector2 screenPoint = new Vector2(screenX, screenY);
 
+        Vector3 anchorPos;
+        Quaternion anchorRot;
         float depth = 1.5f;
+
         List<ARRaycastHit> hits = new();
-        if (raycastManager.Raycast(new Vector2(viewportPoint.x * Screen.width, viewportPoint.y * Screen.height), hits, TrackableType.Planes))
+        bool hitDetected = raycastManager.Raycast(screenPoint, hits, TrackableType.Planes);
+
+        if (hitDetected && hits.Count > 0)
         {
-            Vector3 hitPos = hits[0].pose.position;
-            Vector3 cameraPos = Camera.main.transform.position;
-            depth = Vector3.Distance(cameraPos, hitPos);
-            Debug.Log($"[AR] Plane detected at depth: {depth}");
+            ARRaycastHit selectedHit = hits[0];
+            foreach (var hit in hits)
+            {
+                if (hit.trackable is ARPlane plane && plane.alignment == PlaneAlignment.HorizontalUp)
+                {
+                    selectedHit = hit;
+                    break;
+                }
+            }
+            anchorPos = selectedHit.pose.position;
+            anchorRot = selectedHit.pose.rotation;
+            depth = Vector3.Distance(Camera.main.transform.position, anchorPos);
         }
         else
         {
-            Debug.LogWarning("[AR] No plane detected, using default depth: " + depth);
+            Debug.LogWarning("[AR] No plane detected, using default depth.");
+            anchorPos = Camera.main.ScreenPointToRay(screenPoint).GetPoint(depth);
+            anchorRot = Quaternion.LookRotation(Camera.main.transform.forward, Camera.main.transform.up);
         }
 
-        Vector3 worldPos = Camera.main.ViewportToWorldPoint(new Vector3(viewportPoint.x, viewportPoint.y, depth));
+        ARAnchor anchor = anchorManager.AddAnchor(new Pose(anchorPos, anchorRot));
+        if (anchor == null)
+        {
+            Debug.LogWarning("[AR] Failed to create anchor.");
+            return;
+        }
 
-        float labelHeightOffset = 0.1f;
-        float labelHorizontalOffset = 0.05f;
-        worldPos += Camera.main.transform.up * labelHeightOffset;
-        worldPos += Camera.main.transform.right * labelHorizontalOffset;
+        float bboxWidthNorm = (det.xmax - det.xmin) / width;
+        float bboxHeightNorm = (det.ymax - det.ymin) / height;
 
-        GameObject label = Instantiate(labelPrefab, worldPos, Quaternion.identity);
+        float worldWidth = Mathf.Abs(Camera.main.ViewportToWorldPoint(new Vector3(bboxWidthNorm, 0, depth)).x
+                                   - Camera.main.ViewportToWorldPoint(new Vector3(0, 0, depth)).x);
+        float worldHeight = Mathf.Abs(Camera.main.ViewportToWorldPoint(new Vector3(0, bboxHeightNorm, depth)).y
+                                    - Camera.main.ViewportToWorldPoint(new Vector3(0, 0, depth)).y);
+
+        GameObject cube = Instantiate(cubeOutlinePrefab, anchor.transform);
+        cube.transform.localScale = new Vector3(worldWidth, 0.01f, worldHeight);
+        cube.transform.localPosition = Vector3.zero;
+
+        GameObject label = Instantiate(labelPrefab, anchor.transform);
         TextMeshPro textMesh = label.GetComponentInChildren<TextMeshPro>();
         if (textMesh != null)
         {
             string displayText = det.name;
             if (classDictionary.TryGetValue(displayText, out string translated))
-            {
                 displayText = translated;
-            }
-            textMesh.text = displayText;
             float scaleFactor = depth * 0.2f;
+            string capitalized = char.ToUpper(det.name[0]) + det.name.Substring(1).ToLower();
+            textMesh.text = capitalized + " : " + displayText;
             textMesh.fontSize = Mathf.Clamp(scaleFactor * 10f, 0.2f, 5f);
-            textMesh.alignment = TextAlignmentOptions.Center;
-        }
-        else
-        {
-            Debug.LogWarning("[AR] TextMeshPro component not found in label prefab.");
+            textMesh.alignment = TextAlignmentOptions.CenterGeoAligned;
         }
 
-        float distance = Vector3.Distance(Camera.main.transform.position, worldPos);
-        float labelScaleFactor = distance * 0.2f;
+        label.transform.localPosition = new Vector3(0, worldHeight / 2f + 0.05f, 0);
+        float labelScaleFactor = depth * 0.2f;
         label.transform.localScale = Vector3.one * labelScaleFactor;
 
-        Vector3 directionToCamera = (Camera.main.transform.position - worldPos).normalized;
+        Vector3 directionToCamera = (Camera.main.transform.position - anchorPos).normalized;
         label.transform.rotation = Quaternion.LookRotation(directionToCamera, Vector3.up);
         label.transform.Rotate(0, 180f, 0);
 
-        activeLabels.Add(label);
+        activeLabels.Add(anchor.gameObject);
+
+        Debug.Log($"Anchor Rotation: {anchor.transform.rotation.eulerAngles}");
+        Debug.Log($"Cube Rotation: {cube.transform.rotation.eulerAngles}");
     }
 
     void ClearLabels()
