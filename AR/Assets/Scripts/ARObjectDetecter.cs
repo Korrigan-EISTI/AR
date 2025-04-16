@@ -21,6 +21,7 @@ public class ARClientTCP : MonoBehaviour
     public RectTransform scanWindow;
     public string serverIP = "172.31.208.1";
     public int serverPort = 5001;
+    public TTSClient ttsClient;
 
     private List<GameObject> activeLabels = new();
     private Dictionary<string, string> classDictionary;
@@ -214,6 +215,7 @@ public class ARClientTCP : MonoBehaviour
 
         activeLabels.Add(anchor.gameObject);
 
+        ttsClient.Speak(textMesh.text);
         Debug.Log($"Anchor Rotation: {anchor.transform.rotation.eulerAngles}");
         Debug.Log($"Cube Rotation: {cube.transform.rotation.eulerAngles}");
     }
